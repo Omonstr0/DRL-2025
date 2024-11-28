@@ -7,8 +7,8 @@ import time
 from game_functions import draw_boards, initialize_diagonal, can_place, calculate_winner
 from agent import get_agent_class, DQLearning, RandomAgent, DoubleDeepQLearning
 
-AGENT1 = "DoubleDeepQLearningWithExperienceReplay"
-AGENT2 = "DoubleDeepQLearningWithExperienceReplay"
+AGENT1 = "REINFORCE"
+AGENT2 = "DQLearning"
 
 def main():
     # Initialisation de Pygame
