@@ -1,10 +1,12 @@
 # agent.py
 import numpy as np
+import tensorflow as tf
 import random
 from tensorflow.keras.layers import Dense, Input
 from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.initializers import GlorotUniform
 from game_functions import can_place
 from collections import deque
 from experience_replay import ExperienceReplay
@@ -625,31 +627,36 @@ class DoubleDeepQLearningWithPrioritizedExperienceReplay(Agent):
 
 #############################
 class REINFORCE(Agent):
-    def __init__(self, player_id, state_size=17, action_size=17, learning_rate=0.001, gamma=0.99):
+    def __init__(self, player_id, state_size=17, action_size=17, learning_rate=1e-4, gamma=0.99,
+                 batch_size=5, entropy_coeff=0.01):
         super().__init__(player_id)
         self.state_size = state_size
         self.action_size = action_size
         self.learning_rate = learning_rate
         self.gamma = gamma  # Facteur de réduction
-        self.model = self.build_model()
+        self.batch_size = batch_size
+        self.entropy_coeff = entropy_coeff
+        self.policy_model = self.build_policy_model()
+        self.optimizer = Adam(learning_rate=self.learning_rate)
         self.states = []
         self.actions = []
         self.rewards = []
+        self.episode_count = 0  # Compteur d'épisodes pour le batch
 
-    def build_model(self):
+    def build_policy_model(self):
+        initializer = GlorotUniform()  # Initialisation Xavier/Glorot
         model = Sequential([
             Input(shape=(self.state_size,)),
-            Dense(128, activation='relu'),
-            Dense(128, activation='relu'),
-            Dense(self.action_size, activation='softmax')
+            Dense(256, activation='relu', kernel_initializer=initializer),
+            Dense(256, activation='relu', kernel_initializer=initializer),
+            Dense(256, activation='relu', kernel_initializer=initializer),
+            Dense(self.action_size, activation='softmax', kernel_initializer=initializer)
         ])
-        optimizer = Adam(learning_rate=self.learning_rate)
-        model.compile(optimizer=optimizer, loss='categorical_crossentropy')
         return model
 
     def get_action(self, state, valid_actions):
         state = np.expand_dims(state, axis=0)
-        probs = self.model.predict(state, verbose=0)[0]
+        probs = self.policy_model.predict(state, verbose=0)[0]
         # Masquer les actions invalides
         invalid_actions = [a for a in range(self.action_size) if a not in valid_actions]
         probs[invalid_actions] = 0
@@ -669,32 +676,63 @@ class REINFORCE(Agent):
         self.rewards.append(reward)
 
     def learn(self):
-        # Calcul des récompenses cumulées
-        discounted_rewards = []
-        cumulative = 0
-        for reward in reversed(self.rewards):
-            cumulative = reward + self.gamma * cumulative
-            discounted_rewards.insert(0, cumulative)
-        discounted_rewards = np.array(discounted_rewards)
-        # Normalisation des récompenses
-        discounted_rewards -= np.mean(discounted_rewards)
-        if np.std(discounted_rewards) > 0:
-            discounted_rewards /= np.std(discounted_rewards)
-        # Conversion des actions en format one-hot
+        self.episode_count += 1
+        if self.episode_count % self.batch_size != 0:
+            return  # Attendre d'avoir accumulé suffisamment d'épisodes
+
+        # Convertir les listes en tableaux NumPy
+        states = np.vstack(self.states)
         actions = np.array(self.actions)
+        rewards = np.array(self.rewards)
+
+        # Calcul des retours (G_t)
+        returns = []
+        G = 0
+        for reward in reversed(rewards):
+            G = reward + self.gamma * G
+            returns.insert(0, G)
+        returns = np.array(returns)
+
+        # Normalisation des retours
+        if np.std(returns) > 0:
+            returns = (returns - np.mean(returns)) / (np.std(returns) + 1e-8)
+
+        # Conversion des actions en format one-hot
         actions_one_hot = to_categorical(actions, num_classes=self.action_size)
-        # Conversion des états
-        states = np.array(self.states)
-        # Entraîner le modèle
-        self.model.train_on_batch(states, actions_one_hot, sample_weight=discounted_rewards)
+
+        # Calcul des probabilités d'actions
+        probs = self.policy_model.predict(states, verbose=0)
+        selected_action_probs = np.sum(probs * actions_one_hot, axis=1)
+
+        # Calcul des log-probabilités
+        log_probs = np.log(selected_action_probs + 1e-8)
+
+        # Calcul de l'entropie
+        entropy = -np.sum(probs * np.log(probs + 1e-8), axis=1)
+
+        # Calcul de la perte totale avec régularisation par entropie
+        loss = -np.mean((log_probs * returns) + self.entropy_coeff * entropy)
+
+        # Mise à jour des poids du modèle
+        with tf.GradientTape() as tape:
+            # Recalculer les probabilités pour l'optimisation
+            probs = self.policy_model(states, training=True)
+            selected_action_probs = tf.reduce_sum(probs * actions_one_hot, axis=1)
+            log_probs = tf.math.log(selected_action_probs + 1e-8)
+            entropy = -tf.reduce_sum(probs * tf.math.log(probs + 1e-8), axis=1)
+            loss = -tf.reduce_mean((log_probs * returns) + self.entropy_coeff * entropy)
+
+        grads = tape.gradient(loss, self.policy_model.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.policy_model.trainable_variables))
+
         # Réinitialiser les mémoires
         self.states, self.actions, self.rewards = [], [], []
 
     def save_model(self, file_path):
-        self.model.save(file_path)
+        self.policy_model.save(file_path)
 
     def load_model(self, file_path):
-        self.model = load_model(file_path)
+        self.policy_model = load_model(file_path)
 
     def select_tile(self, deck, discard_pile):
         if discard_pile and random.choice([True, False]):
@@ -716,7 +754,6 @@ class REINFORCE(Agent):
             discard_pile.append(tile)
             self.remember(state, self.action_size - 1, -1)
             return False
-
         # Sélectionner une action
         action = self.get_action(state, valid_actions)
         # Appliquer l'action
@@ -742,8 +779,8 @@ class REINFORCE(Agent):
         state = []
         for row in grid:
             for cell in row:
-                state.append(0 if cell is None else cell)
-        state.append(tile_in_hand if tile_in_hand is not None else 0)
+                state.append(0 if cell is None else cell / 20.0)  # Normalisation des valeurs
+        state.append(tile_in_hand / 20.0 if tile_in_hand is not None else 0)
         return np.array(state, dtype=np.float32)
 
     def get_valid_actions(self, grids, tile, GRID_SIZE):
@@ -891,19 +928,67 @@ class REINFORCEWithBaseline(Agent):
         return valid_actions
 
 #################################
-class RandomAgent(Agent):
-    def __init__(self, player_id):
+class Random(Agent):
+    def __init__(self, player_id, state_size=17, action_size=17):
         super().__init__(player_id)
+        self.state_size = state_size
+        self.action_size = action_size
 
-    def get_action(self, state, valid_actions):
-        return random.choice(valid_actions)
+    def select_tile(self, deck, discard_pile):
+        # Choisir aléatoirement une tuile du deck ou de la défausse
+        options = []
+        if deck:
+            options.append('deck')
+        if discard_pile:
+            options.append('discard')
+        if not options:
+            return None
+        choice = random.choice(options)
+        if choice == 'deck':
+            return deck.pop()
+        else:
+            tile = random.choice(discard_pile)
+            discard_pile.remove(tile)
+            return tile
+
+    def place_tile(self, grids, tile, discard_pile, GRID_SIZE):
+        # Obtenir les actions valides
+        valid_actions = self.get_valid_actions(grids, tile, GRID_SIZE)
+        if not valid_actions:
+            # Aucun emplacement valide, défausser la tuile
+            discard_pile.append(tile)
+            return False
+        # Sélectionner une action aléatoire parmi les actions valides
+        action = random.choice(valid_actions)
+        if action == self.action_size - 1:
+            # Action de défausser
+            discard_pile.append(tile)
+            return False
+        else:
+            i = action // GRID_SIZE
+            j = action % GRID_SIZE
+            if grids[self.player_id][i][j] is not None:
+                discard_pile.append(grids[self.player_id][i][j])
+            grids[self.player_id][i][j] = tile
+            return True
+
+    def get_valid_actions(self, grids, tile, GRID_SIZE):
+        valid_actions = []
+        for i in range(GRID_SIZE):
+            for j in range(GRID_SIZE):
+                if can_place(grids, self.player_id, tile, i, j, GRID_SIZE):
+                    action_index = i * GRID_SIZE + j
+                    valid_actions.append(action_index)
+        # Ajouter l'action de défausse
+        valid_actions.append(self.action_size - 1)  # Index pour défausser
+        return valid_actions
 
 
 
 # Fonction pour obtenir la classe d'agent en fonction du nom
 def get_agent_class(agent_name):
     agents = {
-        "RandomAgent": RandomAgent,
+        "Random": Random,
         "DQLearning": DQLearning,
         "DoubleDeepQLearning": DoubleDeepQLearning,
         "DoubleDeepQLearningWithExperienceReplay": DoubleDeepQLearningWithExperienceReplay,

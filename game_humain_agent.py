@@ -5,7 +5,7 @@ import random
 import sys
 from game_functions import draw_boards, initialize_diagonal, can_place, calculate_winner
 from agent import get_agent_class
-AGENT = "DoubleDeepQLearning"
+AGENT = "REINFORCE"
 
 def main():
     # Initialisation de Pygame

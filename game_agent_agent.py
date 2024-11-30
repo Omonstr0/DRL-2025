@@ -5,10 +5,10 @@ import random
 import sys
 import time
 from game_functions import draw_boards, initialize_diagonal, can_place, calculate_winner
-from agent import get_agent_class, DQLearning, RandomAgent, DoubleDeepQLearning
+from agent import get_agent_class, DQLearning, Random, DoubleDeepQLearning
 
-AGENT1 = "REINFORCE"
-AGENT2 = "DQLearning"
+AGENT1 = "DQLearning"
+AGENT2 = "Random"
 
 def main():
     # Initialisation de Pygame
